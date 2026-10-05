@@ -25,3 +25,7 @@ Each mod folder is self-contained. To install one, copy its folder into the game
 ## Testing
 
 See [dev/README.md](dev/README.md) for driving a running game from the command line, including on another Mac over SSH.
+
+## License
+
+[MIT](LICENSE)
