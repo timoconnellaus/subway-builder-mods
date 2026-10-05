@@ -7,9 +7,10 @@
 //   That 5 m is the moddable constant ELEVATION_THRESHOLDS.ELEVATED, which the
 //   ocean check reads live. "Ferry mode" lowers it (and RAMP) so the normal
 //   build tools accept lanes and wharves at water level, and restores both
-//   when switched off.
-// - Because that constant is global, Ferry mode undoes any non-ferry track
-//   placed while it is on, and every ferry placement is checked for land.
+//   when it ends. It switches on by itself while "Ferry" is the chosen track
+//   type or ferry blueprints are waiting to be built.
+// - Because that constant is global, Ferry mode undoes rail placed between
+//   -1 m and 5 m while it is on, and every ferry placement is checked for land.
 // - Wharves must be built with "Parallel" tracks: the game only lets trains
 //   turn back via a crossover, never by reversing on a single dead-end track.
 (function () {
@@ -23,6 +24,9 @@
   // multiplier instead of the 100x at-grade one. RAMP must move too, because the
   // game classes anything at or below RAMP (default 0) as at-grade.
   const FERRY_MODE_THRESHOLDS = { RAMP: -0.75, ELEVATED: -0.5 };
+
+  // Rail elevations whose classification Ferry mode changes (AT_GRADE to ELEVATED).
+  const LOW_RAIL_BAND = [-1, 5];
 
   // Ferry lanes must sit on the water.
   const MIN_FERRY_ELEVATION = -0.5;
@@ -114,6 +118,9 @@
   let ferryMode = false;
   let savedThresholds = null;
   let undoing = false;
+  let manualFerryMode = false;
+  let pollTimer = null;
+  const POLL_MS = 400;
   const unsubscribers = [];
 
   function notify(message, kind) {
@@ -135,12 +142,39 @@
     if (on) {
       savedThresholds = currentThresholds();
       setThresholds(FERRY_MODE_THRESHOLDS);
-      notify('Ferry mode on. Pick "Ferry" as the track type, set Elevation to 0, and use Parallel tracks for wharves. Only ferry lanes can be built until you switch it off.');
+      notify('Ferry building on: wharves and lanes can sit on the water at 0 m. Build wharves with Parallel tracks.');
     } else {
       setThresholds(savedThresholds || { RAMP: 0, ELEVATED: 5 });
       savedThresholds = null;
-      notify('Ferry mode off. Normal building rules are back.');
     }
+  }
+
+  // The build panel shows the chosen track type as a button next to the
+  // "Track Type" label. Returns that type's id, or null when the panel is shut.
+  function selectedBuildTrackType() {
+    const label = [...document.querySelectorAll('span')].find(
+      (el) => el.childElementCount === 0 && el.textContent.trim() === 'Track Type');
+    if (!label) return null;
+    const idByName = new Map(Object.values(api.trains.getTrainTypes()).map((t) => [t.name, t.id]));
+    let row = label;
+    for (let i = 0; i < 6 && row; i++) {
+      row = row.parentElement;
+      const button = row && [...row.querySelectorAll('button')].find((b) => idByName.has(b.innerText.trim()));
+      if (button) return idByName.get(button.innerText.trim());
+    }
+    return null;
+  }
+
+  // The game prices construction when blueprints are built, so the ferry rules
+  // must stay on until ferry blueprints are built or cleared, or wharves would
+  // be charged the 100x at-grade-over-water rate.
+  function hasFerryBlueprints() {
+    return api.gameState.getTracks().some((t) => t.buildType === 'blueprint' && t.trackType === FERRY_ID);
+  }
+
+  function updateFerryMode() {
+    if (!api) return;
+    setFerryMode(manualFerryMode || selectedBuildTrackType() === FERRY_ID || hasFerryBlueprints());
   }
 
   // The ocean-depth label layer only exists for cities with sea-floor data.
@@ -187,8 +221,12 @@
     const ferry = tracks.filter((t) => t.trackType === FERRY_ID);
     const other = tracks.filter((t) => t.trackType !== FERRY_ID);
 
-    if (ferryMode && other.length > 0) {
-      undoPlacement('Ferry mode is on, so only ferry lanes and wharves can be built. Switch Ferry mode off (ship button, top right) to build rail.');
+    // While the ferry rules are on, rail between -1 m and 5 m would be priced
+    // and checked as if it were elevated. Tunnels and real viaducts are unaffected.
+    const lowRail = other.find((t) =>
+      [t.startElevation, t.endElevation].some((e) => e > LOW_RAIL_BAND[0] && e < LOW_RAIL_BAND[1]));
+    if (ferryMode && lowRail) {
+      undoPlacement('Build or clear your ferry blueprints first, then draw surface rail. Tunnels and bridges 5 m+ are fine now.');
       return;
     }
     if (ferry.length === 0) return;
@@ -223,13 +261,20 @@
     api = sb;
     api.trains.registerTrainType(FERRY_TYPE);
 
+    // Ferry mode follows the build panel on its own; the button shows its state
+    // and can force it on if the panel can't be read (e.g. another language).
     api.ui.addToolbarButton({
       id: 'emerald-ferry-mode',
       icon: 'Ship',
-      tooltip: 'Ferry mode: build ferry lanes and wharves on the water',
-      onClick: () => setFerryMode(!ferryMode),
+      tooltip: 'Ferry building (turns on automatically when "Ferry" is the track type)',
+      onClick: () => {
+        manualFerryMode = !manualFerryMode;
+        updateFerryMode();
+      },
       isActive: () => ferryMode,
     });
+
+    pollTimer = setInterval(updateFerryMode, POLL_MS);
 
     unsubscribers.push(api.hooks.onBlueprintPlaced((tracks) => {
       try {
@@ -240,8 +285,12 @@
     }));
 
     // Never leave the relaxed water rule behind when a game ends or loads.
-    unsubscribers.push(api.hooks.onGameEnd(() => setFerryMode(false)));
-    unsubscribers.push(api.hooks.onGameLoaded(() => setFerryMode(false)));
+    const reset = () => {
+      manualFerryMode = false;
+      setFerryMode(false);
+    };
+    unsubscribers.push(api.hooks.onGameEnd(reset));
+    unsubscribers.push(api.hooks.onGameLoaded(reset));
 
     console.log(`[${MOD}] loaded`);
   }
@@ -254,6 +303,8 @@
   // Exposed so a dev session can hot-load this file repeatedly without
   // stacking hooks from earlier copies.
   function dispose() {
+    clearInterval(pollTimer);
+    manualFerryMode = false;
     setFerryMode(false);
     unsubscribers.splice(0).forEach((unsubscribe) => unsubscribe());
   }

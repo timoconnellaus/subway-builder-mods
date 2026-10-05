@@ -2,7 +2,7 @@
   "id": "com.oconnell.emerald-ferry",
   "name": "Emerald Ferry",
   "description": "Sydney Emerald-class ferries: ferry lanes, wharves and a Ferry mode for building on the water.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Tim O'Connell"
   },
